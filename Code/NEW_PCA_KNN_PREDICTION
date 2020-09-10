@@ -1,0 +1,92 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV as GS
+from sklearn.linear_model import ElasticNet
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.feature_selection import RFE
+from sklearn.decomposition import PCA
+from sklearn.metrics import mean_squared_error as MSE
+from sklearn.ensemble import StackingRegressor
+from sklearn.ensemble import VotingRegressor
+from matplotlib import pyplot as plt
+
+np.set_printoptions(suppress=True)
+
+#%% load train data
+cd4_gene_expr_train = pd.read_csv("./train_data/cd4_gene_expr_train.txt",sep = "\t",  index_col = 0).T.sort_index()
+cd8_gene_expr_train = pd.read_csv("./train_data/cd8_gene_expr_train.txt",sep = "\t",  index_col = 0).T.sort_index()
+cd19_gene_expr_train = pd.read_csv("./train_data/cd19_gene_expr_train.txt",sep = "\t",  index_col = 0).T.sort_index()
+nasal_gene_expr_train = pd.read_csv("./train_data/nasal_gene_expr_train.txt",sep = "\t",  index_col = 0).T.sort_index()
+nasal_microbiome_train = pd.read_csv("./train_data/nasal_microbiome_train.txt",sep = "\t",  index_col = 0).T.sort_index()
+
+train_data = pd.concat([cd4_gene_expr_train, cd8_gene_expr_train, cd19_gene_expr_train, nasal_gene_expr_train, nasal_microbiome_train], axis = 1, sort = True).T.reset_index(drop = True).T
+train_data.index =  pd.to_numeric(train_data.index)
+
+severity_score_train = pd.read_csv("./train_data/severity_score_train.txt",sep = "\t",  index_col = 1).loc[train_data.index]
+
+#%% load test data
+cd4_gene_expr_test = pd.read_csv("./test_data/cd4_gene_expr_test.txt",sep = "\t",  index_col = 0).T.sort_index()
+cd8_gene_expr_test = pd.read_csv("./test_data/cd8_gene_expr_test.txt",sep = "\t",  index_col = 0).T.sort_index()
+cd19_gene_expr_test = pd.read_csv("./test_data/cd19_gene_expr_test.txt",sep = "\t",  index_col = 0).T.sort_index()
+nasal_gene_expr_test = pd.read_csv("./test_data/nasal_gene_expr_test.txt",sep = "\t",  index_col = 0).T.sort_index()
+nasal_microbiome_test = pd.read_csv("./test_data/nasal_microbiome_test.txt",sep = "\t",  index_col = 0).T.sort_index()
+
+test_data = pd.concat([cd4_gene_expr_test, cd8_gene_expr_test, cd19_gene_expr_test, nasal_gene_expr_test, nasal_microbiome_test], axis = 1, sort = True).T.reset_index(drop = True).T
+test_data.index =  pd.to_numeric(test_data.index)
+
+#%% split the data into training and testing, has randomness
+X_train, X_test, y_train, y_test = train_test_split(train_data, severity_score_train, shuffle = True)
+
+#%% fill the missing value, mean or median or fixed number and then standardize X, note that should always standardize by train_data's number
+na_filling_number = X_train.median()
+X_train = X_train.fillna(na_filling_number)
+X_test = X_test.fillna(na_filling_number)
+
+mean = train_data.mean()
+std = train_data.std()
+
+X_train = (X_train - mean) / std
+X_test = (X_test - mean) / std
+
+#Some of the std is 0, meaning this feature is not varying for this feature, we shouldn't drop so it won't mess up with the testing process. Just fill the na with 0
+X_train = X_train.fillna(0)
+X_test = X_test.fillna(0)
+
+#%% PCA to reduce dimension
+pca = PCA(n_components = 10)
+train_data.fillna(na_filling_number)
+pca.fit(((train_data - mean)/ std).fillna(0))
+X_train = pca.transform(X_train)
+X_test = pca.transform(X_test)
+
+#%% KNN
+KNN_parameters = {"n_neighbors" : (4,6,8,10, 12, 15,20), "weights": ("uniform", "distance"), "p":(1,2,3)}
+KNN = KNeighborsRegressor()
+gs_KNN = GS(KNN, KNN_parameters, cv=5, verbose = 5, n_jobs = -1, scoring = "neg_mean_squared_error", return_train_score = True)
+gs_KNN.fit(X_train,y_train)
+KNN_result = pd.DataFrame(gs_KNN.cv_results_)
+best_KNN = gs_KNN.best_estimator_
+KNN_prediction = best_KNN.predict(X_test)
+print("best KNN MSE on test: ", MSE(y_test, KNN_prediction))
+#test_score.append(MSE(y_test, KNN_prediction))
+para = KNN_result.sort_values(by='rank_test_score')
+print(para[['params','mean_test_score','mean_train_score']])
+
+#%% Predict the test data set
+sample_prediction = pd.read_csv("./prediction/prediction.csv", index_col = 1)
+
+test_data = test_data.fillna(na_filling_number)
+test_data = (test_data - mean) / std
+test_data = test_data.fillna(0)
+test_data = test_data.replace(np.Inf, 0)
+test_data = pd.DataFrame(pca.transform(test_data), index = test_data.index)
+KNN_prediction_final = pd.DataFrame(best_KNN.predict(test_data), index = test_data.index)
+KNN_prediction_final = KNN_prediction_final.loc[sample_prediction.index].fillna(severity_score_train.mean().values[0])
+KNN_prediction_final = KNN_prediction_final.reset_index()
+KNN_prediction_final.index = KNN_prediction_final[0].rename("severity_score")
+KNN_prediction_final[["subject_id"]].to_csv("predictions.csv")
+
